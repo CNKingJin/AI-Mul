@@ -229,7 +229,7 @@ outputs/aggregated/paired_delta.csv # 扩散减各基线的配对差值
 outputs/aggregated/figures/        # 聚合图
 ```
 
-只需重绘时运行 `plot_results.py`，无需训练。模型、数据和实验输出都被 `.gitignore` 排除，避免将大文件或数据授权内容推入 Git。
+只需重绘时运行 `plot_results.py`，无需训练。模型、数据和实验输出都被 `.gitignore` 排除，避免将大文件或数据授权内容推入 Git。课程报告骨架见 `REPORT.md`，真实结果待服务器运行后填充。
 
 ## 8. 常见问题与报告边界
 
