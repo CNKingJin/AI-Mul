@@ -7,7 +7,4 @@ export MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
 config_path=${1:-configs/default.yaml}
 python src/prepare_data.py --config "$config_path"
 python src/extract_clip.py --config "$config_path"
-python src/train_diffusion.py --config "$config_path" --direction both
-python src/train_diffusion.py --config "$config_path" --direction both --unconditional
-python src/run_experiments.py --config "$config_path" --exp all
-python src/plot_results.py --config "$config_path"
+python scripts/run_seeds.py --config "$config_path"
