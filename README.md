@@ -1,8 +1,10 @@
 # AI-Mul：条件潜在扩散的缺失图文聚类
 
-面向 Ubuntu 22.04 + RTX 4090 的课程实验工程。实现路线：**冻结 CLIP → 双向条件特征扩散 → 缺失模态补全 → 特征拼接 → K-means → 五组实验**。不生成图片或文本，不微调 CLIP，不包含均值/最近邻/低秩/MLP 等传统补全方法对比。
+面向 Ubuntu 22.04 + RTX 4090 的课程实验工程。实现路线：**冻结 CLIP → 双向条件特征扩散 → 缺失模态补全 → 特征拼接 → K-means → 多组实验**。不生成图片或文本，不微调 CLIP。当前版本加入零填充、训练集均值、KNN、岭回归、MLP 五个无标签补全基线，并在原五组实验上增加多种子聚合、DDIM 步数敏感性和跨模态检索。
 
-这里的“潜在”指 CLIP 投影后的特征空间，没有另训 VAE。代码是根据实验路线实现的轻量工程，**不是某篇论文官方复现，也不保证扩散提升聚类表现**。扩散采样复用官方 `diffusers.DDIMScheduler`，其余任务逻辑在本仓库。
+> **当前状态（2026-10-21）**：代码已在 Windows CPU + Python 3.12 + PyTorch 2.5.1+cpu 上完成 `pytest` 与合成数据 `smoke_test`；真实 Pascal 数据、预训练 CLIP、RTX 4090 正式训练和课程报告结果尚未运行。smoke 数值只用于工程自检，不能当作实验结果。
+
+这里的“潜在”指 CLIP 投影后的特征空间，没有另训 VAE。代码是根据实验路线实现的轻量工程，**不是某篇论文官方复现，也不保证扩散提升聚类表现**。扩散采样复用官方 `diffusers.DDIMScheduler`，其余任务逻辑和基线实现在本仓库。
 
 如果你拿到的是压缩包：先将压缩包放到服务器，执行 `unzip AI-Mul-experiments.zip`，然后 `cd AI-Mul`，从下面的环境配置继续。只有代码已经上传仓库后才执行 `git clone`。
 
@@ -11,7 +13,7 @@
 ```bash
 git clone https://github.com/CNKingJin/AI-Mul.git
 cd AI-Mul
-# 若代码位于实现分支：git checkout codex/five-experiments
+# 当前 main 分支已包含实现代码
 nvidia-smi
 ```
 
@@ -56,7 +58,7 @@ python -m pytest -q
 python scripts/smoke_test.py
 ```
 
-自检会在 `outputs/smoke/` 里生成独立合成数据，训练四个小模型，运行五组实验并绘图；它不下载数据或预训练权重，也不改变正式配置。**这些数值只用于检查工程，不能作为课程实验结果。** 测试还使用一个本地随机初始化的微型 CLIP 检查完整特征提取接口；这不等于验证真实预训练模型效果。
+自检会在 `outputs/smoke/` 里生成独立合成数据，为两个种子各训练四个小模型，运行实验一至七（含五个补全基线）、聚合并绘图；它不下载数据或预训练权重，也不改变正式配置。**这些数值只用于检查工程，不能作为课程实验结果。** 测试还使用一个本地随机初始化的微型 CLIP 检查完整特征提取接口；这不等于验证真实预训练模型效果。
 
 ## 3. 准备真实图文数据
 
@@ -148,9 +150,19 @@ python src/train_diffusion.py --config configs/default.yaml --direction both
 python src/train_diffusion.py --config configs/default.yaml --direction both --unconditional
 ```
 
-也可用 `--direction img2txt` 或 `--direction txt2img` 单独训练。无条件版本保持相同网络参数量，条件输入全部置零，训练与推理一致；这是控制条件信息的消融，不是传统方法对比。
+也可用 `--direction img2txt` 或 `--direction txt2img` 单独训练。无条件版本保持相同网络参数量，条件输入全部置零，训练与推理一致；这是控制条件信息的消融。传统补全基线由 `src/baselines.py` 单独实现，只使用 train 拟合、val 选超参。
 
-默认配置：512 维 CLIP 特征、128 维正弦时间嵌入、两层 512 隐层 MLP、100 个训练噪声步、20 步确定性 DDIM、100 epoch、batch 128、AdamW lr=1e-3。每个 epoch 使用同一份验证噪声和时间步；按最低验证噪声 MSE 保存最佳权重。测试集合不用于训练、选模型或确定超参数。
+正式多种子流程会为 `configs/default.yaml` 中的每个种子训练四个模型，并自动聚合：
+
+```bash
+python scripts/run_seeds.py --config configs/default.yaml
+# 只跑一个种子：
+python scripts/run_seeds.py --config configs/default.yaml --seeds 42
+# 已有 seeds/ 结果时只重新聚合：
+python src/aggregate.py --config configs/default.yaml
+```
+
+默认配置：512 维 CLIP 特征、128 维正弦时间嵌入、两层 512 隐层 MLP、100 个训练噪声步、20 步确定性 DDIM、100 epoch、batch 128、AdamW lr=1e-3。每个 epoch 使用同一份验证噪声和时间步；按最低验证噪声 MSE 保存最佳权重。测试集合不用于训练、选模型或确定超参数。基线只在 train 上 `fit`，超参只在 val 上选择。
 
 相对路线的两处数值处理：
 
@@ -170,17 +182,21 @@ python src/plot_results.py --config configs/default.yaml
 
 | 实验 | 实际内容 | 主要结果文件（outputs/metrics/） |
 |---|---|---|
-| 一 | 两方向分别遮蔽 30%，只在缺失位置计算 MSE、余弦相似度 | exp1_reconstruction.csv、exp1_per_sample.csv |
-| 二 | 缺失率 10%、30%、50%、70%，另有 0% 完整输入参考 | exp2_missing_rate.csv |
-| 三 | 50% 样本仅缺图像、仅缺文本、双向随机缺失 | exp3_missing_pattern.csv |
-| 四 | 同一 50% mask：条件拼接、无条件拼接、条件生成侧权重 0.5 | exp4_ablation.csv |
-| 五 | 同一测试样本的观测、补全、完整参考表示联合 PCA + t-SNE | exp5_tsne_coordinates.csv |
+| 一 | 两方向分别遮蔽 30%，只在缺失位置计算 MSE、余弦相似度；5 个基线 + 扩散 | exp1_reconstruction.csv、exp1_per_sample.csv |
+| 二 | 缺失率 10%、30%、50%、70%，另有 0% 完整输入参考；5 个基线 + 扩散 | exp2_missing_rate.csv |
+| 三 | 50% 样本仅缺图像、仅缺文本、双向随机缺失；5 个基线 + 扩散 | exp3_missing_pattern.csv |
+| 四 | 同一 50% mask：条件拼接、无条件拼接、生成侧权重 0/.25/.5/.75/1 | exp4_ablation.csv |
+| 五 | 观测、扩散补全、val 选出的最佳基线、完整参考表示联合 PCA + t-SNE | exp5_tsne_coordinates.csv |
+| 六 | 同一 50% mask 下 DDIM 步数 5/10/20/50 的敏感性 | exp6_ddim_steps.csv |
+| 七 | 50% 缺失下的跨模态检索，图→文、文→图 R@1/R@5 | exp7_retrieval.csv |
 
 `r` 表示缺失一个模态的**样本比例**，不是特征元素比例。任何样本至少保留一个模态。随机缺失方向尽量各半；同种子下缺失样本集合随缺失率增大而嵌套。mask、预测特征、簇编号和样本 ID 分别保存在 `outputs/masks/` 与 `outputs/predictions/`，便于核查和重新计算。
 
-主方法拼接 `[z_img; z_txt]` 后整体归一化；只补缺失槽，观测特征严格保留。K 使用已知数据类别总数，K-means `n_init=20`、固定种子；不根据测试标签挑选 K 或挑最好结果。ACC 用 Hungarian 对齐，NMI/ARI 用 sklearn，保存为小数；**ARI 可能为负**，不做截断。
+基线包括 zero（缺失槽置零，等价于只用观测模态）、mean（train 目标模态均值）、KNN、岭回归和 MLP；它们只在 train 上拟合，超参只在 val 的缺失 mask 上选择，测试集不参与。所有补全结果与扩散生成特征一样做 L2 归一化。
 
-实验五的置零观测表示、完整特征仅用于可视化/完整输入参考，不作为额外补全方法。三种表示合并后拟合一个 PCA 和一个 t-SNE，再拆成三个共享坐标面板。t-SNE 只供定性观察，不能据此证明提升。
+主方法拼接 `[z_img; z_txt]` 后整体归一化；只补缺失槽，观测特征严格保留。K 使用已知数据类别总数，K-means `n_init=20`、固定种子；不根据测试标签挑选 K 或挑最好结果。ACC 用 Hungarian 对齐，NMI/ARI 用 sklearn，保存为小数；**ARI 可能为负**，不做截断。每个种子还输出 R@1/R@5、补全 MSE/cosine 和 `metrics_long.csv`，供聚合脚本使用。
+
+实验五的置零观测表示、完整特征仅用于可视化/完整输入参考，不作为额外补全方法。四种表示合并后拟合一个 PCA 和一个 t-SNE，再拆成四个共享坐标面板；最佳基线由 val 补全 MSE 选出，不使用测试标签。t-SNE 只供定性观察，不能据此证明提升。
 
 ## 7. 一键执行及产物位置
 
@@ -190,7 +206,7 @@ python src/plot_results.py --config configs/default.yaml
 bash scripts/run_all.sh configs/default.yaml
 ```
 
-该命令会重新执行划分、提取、四个模型训练、五组实验、绘图；中途失败即停止。已完成提取/训练时，使用上面的分步命令跳过已有阶段。
+该命令会重新执行划分、提取，然后按 `configs/default.yaml` 的 `seeds` 逐个种子训练四个模型、运行实验一至七并聚合绘图；中途失败即停止。已完成提取/训练时，使用上面的分步命令跳过已有阶段。
 
 ```text
 configs/default.yaml          # 全部主要参数
@@ -198,13 +214,19 @@ src/prepare_data.py           # 清洗与划分
 src/extract_clip.py           # 冻结 CLIP 特征
 src/diffusion.py              # 模型、噪声调度、DDIM 采样
 src/train_diffusion.py        # 训练与验证选优
-src/evaluation.py             # mask、融合、聚类和指标
-src/run_experiments.py        # 五组实验
+src/baselines.py              # zero/mean/KNN/ridge/MLP 基线
+src/evaluation.py             # mask、融合、聚类、检索和指标
+src/run_experiments.py        # 实验一至七
+scripts/run_seeds.py          # 多种子训练、实验、聚合编排
+src/aggregate.py              # 多种子 summary/paired delta
 src/plot_results.py           # 从 CSV 重绘
-outputs/checkpoints/         # 四个最佳模型
-outputs/logs/                # loss、环境、评估配置、权重摘要
-outputs/metrics/overview.csv # 实验二至四总览；实验一补全指标单列
-outputs/figures/             # 缺失率/缺失类型/消融图、t-SNE、训练曲线
+outputs/seeds/seed_*/checkpoints/  # 每个种子的四个最佳模型
+outputs/seeds/seed_*/logs/         # loss、环境、评估配置、权重摘要
+outputs/seeds/seed_*/metrics/      # 每个种子的实验 CSV 与 metrics_long.csv
+outputs/seeds/seed_*/figures/      # 每个种子的图
+outputs/aggregated/summary.csv     # 多种子 mean/std/CI
+outputs/aggregated/paired_delta.csv # 扩散减各基线的配对差值
+outputs/aggregated/figures/        # 聚合图
 ```
 
 只需重绘时运行 `plot_results.py`，无需训练。模型、数据和实验输出都被 `.gitignore` 排除，避免将大文件或数据授权内容推入 Git。
@@ -216,10 +238,10 @@ outputs/figures/             # 缺失率/缺失类型/消融图、t-SNE、训练
 - **划分报错**：检查每类有效样本数、总样本数是否能支持 val/test 覆盖所有类别，查看 rejected.csv；不要为了通过划分直接删掉难分类类别而不记录。
 - **旧缓存/旧权重报错**：数据改变后重新提取并训练；不要绕过校验。更换任务时建议修改 features_dir、splits_dir、output_dir 使用独立目录。
 - **训练损失下降但补全差**：噪声预测损失不等价于语义质量，查看验证曲线、生成余弦和实际聚类结果，不根据测试结果反复调参后宣称泛化性能。
-- **结果不提升**：如实报告。小样本随机生成可能削弱类别信息，单次采样和单个种子不能说明统计显著性，也不保证不同设备结果逐位一致。
+- **结果不提升**：如实报告。小样本随机生成可能削弱类别信息；简单基线（KNN、岭回归）在特征空间里可能强于扩散补全，这是正常且值得报告的结论。5 个种子和 t 区间仍属探索性，不保证不同设备结果逐位一致。
 - **指标单位**：ACC/NMI 通常 0–1，ARI 可负；MSE 为归一化特征每维均方误差。不要直接把数值作为百分数绘图。
 
-实验路线默认只做一个种子。报告应注明具体数据版本、有效对数、类别数、划分、设备、模型 commit、种子和“单次运行，未做统计重复”。本文不附造出的真实实验结果。
+实验路线默认使用 `configs/default.yaml` 中的 5 个种子；报告应注明具体数据版本、有效对数、类别数、划分、设备、模型 commit、种子集合，并说明 t 区间在少量种子下仅为探索性、未做大规模统计显著性检验。当前仓库只完成 CPU 合成数据自检，不附造出的真实实验结果。
 
 ## 9. 实现依据与复用范围
 
@@ -227,7 +249,7 @@ outputs/figures/             # 缺失率/缺失类型/消融图、t-SNE、训练
 - [Diffusers DDIMScheduler](https://huggingface.co/docs/diffusers/api/schedulers/ddim) 与 [DDIM 论文](https://arxiv.org/abs/2010.02502)：直接调用库的 add_noise/step，epsilon 预测、eta=0、余弦调度。
 - [Pascal Sentences 官方数据](https://vision.cs.uiuc.edu/pascal-sentences/)：自写页面解析与下载逻辑，保留来源及描述；没有复制第三方下载器。
 
-轻量模型、数据处理、缺失掩码、五组实验和测试代码为本工程实现；依赖及原始模型/数据遵循各自许可。
+补全基线使用 scikit-learn 的 `Ridge`、`NearestNeighbors` 和 PyTorch MLP；数据处理、缺失掩码、扩散训练、实验编排、聚合和测试代码为本工程实现。依赖及原始模型/数据遵循各自许可。
 
 ## 10. 将压缩包代码上传到你的空仓库
 
@@ -236,7 +258,7 @@ outputs/figures/             # 缺失率/缺失类型/消融图、t-SNE、训练
 ```bash
 git init -b main
 git add .
-git commit -m "Implement five diffusion clustering experiments"
+git commit -m "Add baselines, multi-seed experiments and CPU validation"
 git remote add origin https://github.com/CNKingJin/AI-Mul.git
 git push -u origin main
 ```
