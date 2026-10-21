@@ -112,9 +112,11 @@ class CompletionBaselines:
             self.choices[direction]['ridge'] = best[1]
             self.models[direction]['ridge'] = best[2]
 
-            model, score = self._fit_mlp(source_train, target_train,
-                                         self.val[src_key], self.val[tgt_key], direction)
-            self.val_mse[direction]['mlp'] = score
+            model, _ = self._fit_mlp(source_train, target_train,
+                                     self.val[src_key], self.val[tgt_key], direction)
+            with torch.inference_mode():
+                pred = model(torch.from_numpy(source_val).to(self.device)).cpu().numpy()
+            self.val_mse[direction]['mlp'] = _mse(_normalize(pred), target_val)
             self.choices[direction]['mlp'] = self.mlp_epochs
             self.models[direction]['mlp'] = model
 
@@ -148,6 +150,8 @@ class CompletionBaselines:
             model.eval()
             with torch.inference_mode():
                 vloss = torch.nn.functional.mse_loss(model(vx), vy).item()
+            if not np.isfinite(vloss):
+                raise ValueError('Non-finite baseline validation loss')
             if vloss < best:
                 best = vloss
                 stale = 0
